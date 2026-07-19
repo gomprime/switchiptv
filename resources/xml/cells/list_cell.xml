@@ -1,0 +1,17 @@
+<brls:Box
+    width="auto"
+    height="auto"
+    focusable="true"
+    paddingTop="12"
+    paddingBottom="12"
+    paddingLeft="16"
+    paddingRight="16">
+
+    <brls:Label
+        id="title"
+        width="auto"
+        height="auto"
+        grow="1.0"
+        fontSize="20" />
+
+</brls:Box>
