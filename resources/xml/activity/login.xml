@@ -1,0 +1,56 @@
+<brls:AppletFrame
+    title="IPTV Player"
+    footerHidden="true">
+
+    <brls:ScrollingFrame
+        width="auto"
+        height="auto"
+        grow="1.0">
+
+        <brls:Box
+            width="70%"
+            height="auto"
+            axis="column"
+            alignItems="stretch"
+            justifyContent="center"
+            grow="1.0"
+            marginTop="40"
+            marginBottom="40"
+            marginLeft="auto"
+            marginRight="auto">
+
+            <brls:Label
+                id="errorLabel"
+                width="auto"
+                height="auto"
+                marginBottom="20"
+                visibility="gone" />
+
+            <brls:SelectorCell
+                id="formMode" />
+
+            <brls:InputCell
+                id="serverUrl"
+                type="url" />
+
+            <brls:InputCell
+                id="username"
+                type="text" />
+
+            <brls:InputCell
+                id="password"
+                type="password" />
+
+            <brls:Button
+                id="loginButton"
+                width="auto"
+                height="auto"
+                style="primary"
+                marginTop="20"
+                text="Entrar" />
+
+        </brls:Box>
+
+    </brls:ScrollingFrame>
+
+</brls:AppletFrame>
