@@ -1,0 +1,266 @@
+diff --git a/library/include/borealis/views/recycler.hpp b/library/include/borealis/views/recycler.hpp
+index a29b5324..3e9db468 100644
+--- a/library/include/borealis/views/recycler.hpp
++++ b/library/include/borealis/views/recycler.hpp
+@@ -257,6 +257,11 @@ class RecyclerFrame : public ScrollingFrame
+     std::map<std::string, std::vector<RecyclerCell*>*> queueMap;
+     std::map<std::string, std::function<RecyclerCell*(void)>> allocationMap;
+ 
++    // Precisa ser por-instância: com mais de uma RecyclerFrame viva ao mesmo
++    // tempo (larguras diferentes), uma variável `static` local aqui faz cada
++    // instância "roubar" o valor da outra a cada layout, disparando
++    // reloadData() infinitamente e estourando a pilha por recursão no Yoga.
++    float oldWidth = -1;
+     bool checkWidth();
+ 
+     void cacheCellFrames();
+diff --git a/library/include/borealis/views/tab_frame.hpp b/library/include/borealis/views/tab_frame.hpp
+index c8ea1477..68e3fbf0 100644
+--- a/library/include/borealis/views/tab_frame.hpp
++++ b/library/include/borealis/views/tab_frame.hpp
+@@ -19,6 +19,7 @@
+ 
+ #include <borealis/core/bind.hpp>
+ #include <borealis/views/applet_frame.hpp>
++#include <borealis/views/label.hpp>
+ #include <borealis/views/sidebar.hpp>
+ #include <functional>
+ 
+@@ -41,10 +42,23 @@ class TabFrame : public Box
+     void clearTabs();
+     void addSeparator();
+ 
++    // Linha clicável abaixo da lista de abas (ex.: "Sobre") — separada do
++    // grupo de abas em si, então navegar até ela com D-pad não troca o
++    // conteúdo (só ativa com clique/A), diferente do `addTab`.
++    void setAboutAction(std::string label, std::function<void()> callback);
++
++    // Texto de legenda fixo abaixo da linha de "Sobre".
++    void setHintsText(std::string text);
++
++    View* getActiveTab() const { return activeTab; }
++
+     static View* create();
+ 
+   private:
+     BRLS_BIND(Sidebar, sidebar, "brls/tab_frame/sidebar");
++    BRLS_BIND(Box, aboutRow, "brls/tab_frame/about_row");
++    BRLS_BIND(Label, aboutLabel, "brls/tab_frame/about_label");
++    BRLS_BIND(Label, hintsLabel, "brls/tab_frame/hints_label");
+ 
+     View* activeTab = nullptr;
+ };
+diff --git a/library/lib/core/box.cpp b/library/lib/core/box.cpp
+index 732b3f82..e3ab7d00 100644
+--- a/library/lib/core/box.cpp
++++ b/library/lib/core/box.cpp
+@@ -217,6 +217,14 @@ void Box::removeView(View* view, bool free)
+     if (!found)
+         return;
+ 
++    // Se a view removida era a que tinha (ou tem descendente com) foco,
++    // limpa lastFocusedView antes de liberar — senão fica um ponteiro
++    // pendurado e a próxima navegação por D-pad chama um método virtual
++    // em memória já liberada (crash com PC quase nulo). clearViews() já
++    // fazia isso, removeView() não fazia (bug vendorizado da borealis).
++    if (view == lastFocusedView)
++        lastFocusedView = nullptr;
++
+     // Remove it
+     if (!view->isDetached())
+         YGNodeRemoveChild(this->ygNode, view->getYGNode());
+diff --git a/library/lib/core/style.cpp b/library/lib/core/style.cpp
+index acc310a4..0ac9f3db 100644
+--- a/library/lib/core/style.cpp
++++ b/library/lib/core/style.cpp
+@@ -64,7 +64,7 @@ static StyleValues styleValues = {
+     { "brls/applet_frame/footer_padding_sides", 25.0f },
+ 
+     // TabFrame
+-    { "brls/tab_frame/sidebar_width", 410.0f },
++    { "brls/tab_frame/sidebar_width", 220.0f },
+     { "brls/tab_frame/content_padding_top_bottom", 42.0f }, // unused by the library, here for users
+     { "brls/tab_frame/content_padding_sides", 60.0f }, // unused by the library, here for users
+ 
+@@ -72,7 +72,7 @@ static StyleValues styleValues = {
+     { "brls/sidebar/border_height", 16.0f },
+     { "brls/sidebar/padding_top", 32.0f },
+     { "brls/sidebar/padding_bottom", 47.0f },
+-    { "brls/sidebar/padding_left", 80.0f },
++    { "brls/sidebar/padding_left", 40.0f },
+     { "brls/sidebar/padding_right", 40.0f },
+     { "brls/sidebar/item_height", 70.0f },
+     { "brls/sidebar/item_accent_margin_top_bottom", 9.0f },
+diff --git a/library/lib/platforms/switch/switch_font.cpp b/library/lib/platforms/switch/switch_font.cpp
+index 3bba8891..c51ec3ce 100644
+--- a/library/lib/platforms/switch/switch_font.cpp
++++ b/library/lib/platforms/switch/switch_font.cpp
+@@ -45,6 +45,12 @@ void SwitchFontLoader::loadFonts()
+     {
+         brls::Logger::info("Load custom font: {}", USER_FONT_PATH);
+         this->loadFontFromFile(FONT_CHINESE_SIMPLIFIED, USER_FONT_PATH);
++        // Sem isso, qualquer glyph que falte na fonte customizada (ex.:
++        // acentos do português numa fonte pensada só pra CJK) aparece como
++        // quadrado — o fallback pra fonte "Standard" do sistema (que tem
++        // cobertura latina completa) só era registrado no ramo `else`
++        // (fonte customizada ausente), nunca quando ela existe.
++        nvgAddFallbackFontId(vg, Application::getFont(FONT_CHINESE_SIMPLIFIED), Application::getFont(FONT_REGULAR));
+     }
+     else
+     {
+diff --git a/library/lib/views/recycler.cpp b/library/lib/views/recycler.cpp
+index 8e6acb30..5b3eafab 100644
+--- a/library/lib/views/recycler.cpp
++++ b/library/lib/views/recycler.cpp
+@@ -267,7 +267,12 @@ void RecyclerFrame::reloadData()
+             }
+         }
+ 
+-        selectRowAt(defaultCellFocus, false);
++        // Sem isso, uma RecyclerFrame com 0 seções (dados ainda não
++        // chegaram — ex.: lista populada depois de uma resposta de rede)
++        // crasha aqui: selectRowAt() indexa cacheFramesData[0] só com
++        // 0 == 0, mas o vetor está vazio (out-of-bounds).
++        if (!cacheFramesData.empty())
++            selectRowAt(defaultCellFocus, false);
+     }
+ }
+ 
+@@ -320,6 +325,16 @@ void RecyclerFrame::selectRowAt(IndexPath indexPath, bool animated)
+         offset += this->cacheFramesData[count++].height;
+ 
+     offset -= this->getHeight() / 2;
++    // Centralizar uma das primeiras linhas (perto do topo, sem conteúdo
++    // suficiente acima pra "empurrar") dá um offset negativo. Sem limitar
++    // isso aqui, `cellsRecyclingLoop()` (chamado logo abaixo) enxerga esse
++    // valor negativo momentaneamente e descarta o cabeçalho/primeiras
++    // linhas por acreditar que já "rolaram pra fora" — e esse descarte não
++    // é desfeito depois, mesmo quando o offset é clampado pra 0 na prática
++    // (achado com uma lista de episódios de série abrindo já a partir do
++    // 2º episódio, pulando o cabeçalho da temporada e o 1º).
++    if (offset < 0)
++        offset = 0;
+     this->setContentOffsetY(offset, animated);
+     this->cellsRecyclingLoop();
+ 
+@@ -368,15 +383,18 @@ void RecyclerFrame::cacheCellFrames()
+ 
+ bool RecyclerFrame::checkWidth()
+ {
+-    float width           = getWidth();
+-    static float oldWidth = width;
+-    if ((int)oldWidth != (int)width && width != 0)
+-    {
+-        oldWidth = width;
+-        return true;
+-    }
+-    oldWidth = width;
+-    return false;
++    float width = getWidth();
++    if (width == 0)
++        return false;
++
++    // Primeira vez que essa instância tem uma largura real resolvida (oldWidth
++    // ainda -1): precisa disparar o reload inicial mesmo sem "mudança" de
++    // valor — senão um RecyclerFrame cujo container já nasce com a largura
++    // final (ex.: troca de aba, sem passe intermediário de largura 0) nunca
++    // chama reloadData() e fica com a lista vazia pra sempre.
++    bool changed = (oldWidth < 0) || ((int)oldWidth != (int)width);
++    oldWidth      = width;
++    return changed;
+ }
+ 
+ void RecyclerFrame::cellsRecyclingLoop()
+diff --git a/library/lib/views/tab_frame.cpp b/library/lib/views/tab_frame.cpp
+index 2c0eec8e..0b7691af 100644
+--- a/library/lib/views/tab_frame.cpp
++++ b/library/lib/views/tab_frame.cpp
+@@ -31,10 +31,48 @@ const std::string tabFrameContentXML = R"xml(
+         height="auto"
+         axis="row">
+ 
+-        <brls:Sidebar
+-            id="brls/tab_frame/sidebar"
++        <brls:Box
+             width="@style/brls/tab_frame/sidebar_width"
+-            height="auto" />
++            height="auto"
++            axis="column">
++
++            <brls:Sidebar
++                id="brls/tab_frame/sidebar"
++                width="auto"
++                height="auto"
++                grow="1.0" />
++
++            <brls:Box
++                id="brls/tab_frame/about_row"
++                width="auto"
++                height="auto"
++                axis="column"
++                focusable="true"
++                visibility="gone"
++                paddingTop="16"
++                paddingBottom="16"
++                paddingLeft="40"
++                paddingRight="40">
++
++                <brls:Label
++                    id="brls/tab_frame/about_label"
++                    width="auto"
++                    height="auto"
++                    fontSize="20" />
++
++            </brls:Box>
++
++            <brls:Label
++                id="brls/tab_frame/hints_label"
++                width="auto"
++                height="auto"
++                fontSize="14"
++                marginTop="8"
++                marginBottom="16"
++                marginLeft="40"
++                marginRight="40" />
++
++        </brls:Box>
+ 
+         <!-- Content will be injected here with grow="1.0" -->
+ 
+@@ -74,6 +112,13 @@ void TabFrame::addTab(std::string label, TabViewCreator creator)
+ 
+         this->activeTab = newContent;
+ 
++        // Força as mesmas dimensões explícitas que `Activity::resizeToFitWindow()`
++        // já aplica uma vez (só no evento de redimensionamento da janela, no
++        // início do app) — sem isso, a caixa raiz do TabFrame (width="auto" no
++        // XML) fica com uma medição instável do Yoga em qualquer troca de aba
++        // depois da primeira, deslocando o conteúdo pra uma posição errada.
++        this->setDimensions(Application::contentWidth, Application::contentHeight);
++
+         newContent->registerAction(
+             "hints/back"_i18n, BUTTON_B, [this](View* view) {
+                 if (Application::getInputType() == InputType::TOUCH)
+@@ -91,6 +136,22 @@ void TabFrame::focusTab(int position)
+     Application::giveFocus(this->sidebar->getItem(position));
+ }
+ 
++void TabFrame::setAboutAction(std::string label, std::function<void()> callback)
++{
++    this->aboutLabel->setText(label);
++    this->aboutRow->setVisibility(Visibility::VISIBLE);
++    this->aboutRow->registerClickAction([callback](View*) {
++        if (callback)
++            callback();
++        return true;
++    });
++}
++
++void TabFrame::setHintsText(std::string text)
++{
++    this->hintsLabel->setText(text);
++}
++
+ void TabFrame::clearTabs()
+ {
+     this->sidebar->clearItems();
